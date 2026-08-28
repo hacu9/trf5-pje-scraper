@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# scraper output: extracted data, downloaded PDFs, run state and logs
+data/
+out/
+test/.output/
+*.log
+
+# environment
+.env
+.env.local
+
+# editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
