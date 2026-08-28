@@ -20,7 +20,7 @@ import { SearchView } from '../jsf/searchView';
 import { looksLikeExpiredView } from '../jsf/ajaxResponse';
 import { isAtServerCap, parseSearchResults, RESULT_TABLE_SELECTOR } from './listParser';
 import { parseProcessDetail } from './detailParser';
-import { fetchRemainingPages, findMovementPager } from './movementPager';
+import { fetchRemainingPages, findPanelPagers, hasSlider } from './panelPager';
 import { PdfDownloader } from './pdfDownloader';
 import { Planner, PlanCell, PlanOptions } from './planner';
 import { Store } from '../store/persistence';
@@ -231,38 +231,7 @@ export class Crawler {
         headers: { Referer: this.view.url },
       });
       const detail = parseProcessDetail(response.text, row.ca, row.detailUrl);
-
-      // The delivered HTML is only the first page of the movements panel. The
-      // rest sits behind the `pagina` slider, along with its documents.
-      const pager = findMovementPager(response.text);
-      if (pager !== null && pager.lastPage > pager.currentPage) {
-        const extra = await fetchRemainingPages(
-          this.http,
-          row.detailUrl,
-          pager,
-          row.numeroProcesso,
-        );
-        detail.movimentacoes.push(...extra.movimentacoes);
-        detail.documentos.push(...dedupeDocuments(detail.documentos, extra.documentos));
-        detail.movimentacoesPaginas = pager.lastPage;
-        detail.movimentacoesPaginasLidas = 1 + extra.pagesRead;
-        detail.movimentacoesCompleto = extra.pagesFailed === 0;
-        if (
-          pager.reportedTotal !== null &&
-          detail.movimentacoes.length < pager.reportedTotal &&
-          extra.pagesFailed === 0
-        ) {
-          log.warn('fewer movements than the panel reported', {
-            numeroProcesso: row.numeroProcesso,
-            got: detail.movimentacoes.length,
-            reported: pager.reportedTotal,
-          });
-        }
-      } else {
-        detail.movimentacoesPaginas = 1;
-        detail.movimentacoesPaginasLidas = 1;
-        detail.movimentacoesCompleto = true;
-      }
+      await this.pageEveryPanel(detail, row, response.text);
       return detail;
     } catch (error) {
       const failure = error as HttpFailure;
@@ -276,6 +245,89 @@ export class Crawler {
       });
       return null;
     }
+  }
+
+  /**
+   * Read every page of every pageable panel on the detail view.
+   *
+   * The delivered HTML is page one. A case detail page carries up to two
+   * sliders, one for the movements panel and one for the documents grid, and
+   * they must BOTH be walked: the documents grid holding a second page is how
+   * eight downloadable PDFs stayed invisible on a case that looked complete.
+   *
+   * Completeness is asserted only on positive evidence. Every branch that cannot
+   * prove the panel was read in full marks the case partial, because a record
+   * that is short and says so is recoverable and one that is short and claims to
+   * be whole is not.
+   */
+  private async pageEveryPanel(
+    detail: ProcessDetail,
+    row: ProcessSummary,
+    html: string,
+  ): Promise<void> {
+    const allPagers = findPanelPagers(html);
+    const pagers = allPagers.filter((pager) => pager.lastPage > pager.currentPage);
+
+    if (pagers.length === 0) {
+      // A page with no slider is a short record and is genuinely complete. A
+      // page that HAS a slider we could not parse is not, and the two produce
+      // the same empty list, so they are separated here rather than conflated.
+      const unreadable = hasSlider(html) && allPagers.length === 0;
+      if (unreadable) {
+        log.warn('the detail page is paged but no slider could be read, recording partial', {
+          numeroProcesso: row.numeroProcesso,
+        });
+      }
+      detail.movimentacoesPaginas = 1;
+      detail.movimentacoesPaginasLidas = 1;
+      detail.movimentacoesCompleto = !unreadable;
+      return;
+    }
+
+    let pagesOffered = 0;
+    let pagesRead = 0;
+    let pagesFailed = 0;
+    let complete = true;
+    // The footer total of each panel, once we know which panel a pager drives.
+    let expectedMovements: number | null = null;
+    let expectedDocuments: number | null = null;
+
+    for (const pager of pagers) {
+      const extra = await fetchRemainingPages(this.http, row.detailUrl, pager, row.numeroProcesso);
+
+      detail.movimentacoes.push(...extra.movimentacoes);
+      detail.documentos.push(...dedupeDocuments(detail.documentos, extra.documentos));
+
+      pagesOffered += pager.lastPage;
+      pagesRead += 1 + extra.pagesRead;
+      pagesFailed += extra.pagesFailed;
+      if (extra.pagesFailed > 0) complete = false;
+
+      if (extra.kind === 'movements') expectedMovements = pager.reportedTotal;
+      else if (extra.kind === 'documents') expectedDocuments = pager.reportedTotal;
+    }
+
+    // Compare against the totals the portal prints itself, in BOTH directions.
+    // Reading too few means a page was lost. Reading too many means a page
+    // request did not advance and rows were counted twice, which is the shape a
+    // paging bug takes when the trigger parameter stops working.
+    for (const [label, got, reported] of [
+      ['movements', detail.movimentacoes.length, expectedMovements],
+      ['documents', detail.documentos.length, expectedDocuments],
+    ] as Array<[string, number, number | null]>) {
+      if (reported === null || got === reported) continue;
+      complete = false;
+      log.warn('panel count does not match the total the portal reported', {
+        numeroProcesso: row.numeroProcesso,
+        panel: label,
+        got,
+        reported,
+      });
+    }
+
+    detail.movimentacoesPaginas = pagesOffered;
+    detail.movimentacoesPaginasLidas = pagesRead;
+    detail.movimentacoesCompleto = complete && pagesFailed === 0;
   }
 
   private async downloadDocuments(detail: ProcessDetail): Promise<void> {
@@ -452,12 +504,28 @@ export class Crawler {
  * PDF is not downloaded, or counted, twice.
  */
 function dedupeDocuments(existing: DocumentRef[], incoming: DocumentRef[]): DocumentRef[] {
-  const seen = new Set(existing.map((document) => document.idProcessoDocumento));
+  const byId = new Map(existing.map((document) => [document.idProcessoDocumento, document]));
   const kept: DocumentRef[] = [];
+
   for (const document of incoming) {
-    if (seen.has(document.idProcessoDocumento)) continue;
-    seen.add(document.idProcessoDocumento);
-    kept.push(document);
+    const already = byId.get(document.idProcessoDocumento);
+    if (already === undefined) {
+      byId.set(document.idProcessoDocumento, document);
+      kept.push(document);
+      continue;
+    }
+    // Same document, seen twice. The panels do not always describe it equally:
+    // one can offer the login gated HTML view while the other offers the real
+    // PDF. Keeping whichever arrived first would throw away a downloadable file,
+    // so a record that carries a download link upgrades one that does not.
+    if (already.downloadUrl === null && document.downloadUrl !== null) {
+      already.downloadUrl = document.downloadUrl;
+      already.formato = document.formato;
+      already.idBin = document.idBin ?? already.idBin;
+      already.numeroDocumento = document.numeroDocumento ?? already.numeroDocumento;
+      already.nomeArquivo = document.nomeArquivo ?? already.nomeArquivo;
+    }
   }
+
   return kept;
 }

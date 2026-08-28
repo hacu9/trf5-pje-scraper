@@ -135,9 +135,10 @@ No postback and no ViewState needed. Panels observed:
 * Movimentacoes do Processo (`j_id146:processoEvento`)
 * Documentos juntados ao processo (`j_id146:processoDocumentoGridTab`)
 
-The parties lists page with a datascroller. The movements panel does NOT, and
-that difference caused a real defect: it has no `<tfoot>` and no scroller, so it
-looks complete. It pages with a RichFaces *Slider* labelled `pagina`:
+The parties lists page with a datascroller. The movements panel and the documents
+grid do NOT, and that difference caused the same defect twice: they have no
+`<tfoot>` and no scroller, so they look complete. They page with a RichFaces
+*Slider* labelled `pagina`:
 
     new Richfaces.Slider("j_id146:j_id561:j_id562",
       {'minValue':'1','maxValue':'5','sliderValue':'1',
@@ -145,9 +146,23 @@ looks complete. It pages with a RichFaces *Slider* labelled `pagina`:
            {\'containerId\':\'j_id146:j_id474\',
             \'parameters\':{\'j_id146:j_id561:j_id563\':\'...\'}})'})
 
-Case `0001223-51.1994.4.05.8300` delivered 15 movements against a footer reading
-`65 resultados encontrados`, over 5 slider pages. Documents attach to movements,
-so the later pages carry PDFs that the first page never mentions.
+**There are TWO sliders on a detail page**, and they are near identical: both are
+labelled `pagina`, both drive an A4J postback, and only the `containerId` region
+distinguishes them.
+
+    j_id146:j_id561:*  region j_id146:j_id474  ->  Movimentacoes
+    j_id146:j_id653:*  region j_id146:j_id569  ->  Documentos juntados
+
+Measured on case `0001223-51.1994.4.05.8300`:
+
+    delivered HTML only     15 movements, 15 documents
+    movements slider only   65 movements, 15 documents
+    both sliders            65 movements, 23 documents
+
+The middle row is the dangerous one. It reconciles perfectly against the
+movements footer and still loses eight downloadable PDFs, because the documents
+grid keeps its own footer and its own slider. So the completeness check runs per
+panel, against the footer of that panel.
 
 The page request is an ordinary RichFaces 3.3 postback and needs BOTH the slider
 value and the trigger parameter. With the value alone the server answers 200 and

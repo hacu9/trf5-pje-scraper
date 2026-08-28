@@ -39,7 +39,7 @@ import { looksLikeExpiredView, parseAjaxResponse } from '../src/jsf/ajaxResponse
 import { assertCaptchaDisabled, extractJsFunctionId } from '../src/jsf/searchView';
 import { parseSearchResults, RESULT_TABLE_SELECTOR } from '../src/scrape/listParser';
 import { parseProcessDetail, queryParam, readDocuments, slugify } from '../src/scrape/detailParser';
-import { findMovementPager, pageForm } from '../src/scrape/movementPager';
+import { findPanelPagers, hasSlider, pageForm } from '../src/scrape/panelPager';
 import { cellKey, formatDate, parseDate, splitRange, Planner } from '../src/scrape/planner';
 import { PdfDownloader } from '../src/scrape/pdfDownloader';
 import { Store } from '../src/store/persistence';
@@ -645,18 +645,34 @@ test('the failure queue survives a restart and deduplicates by key', async () =>
 // and `detail.html` in this very fixtures folder was already a two page case.
 // ---------------------------------------------------------------------------
 
-test('the movements panel is paginated, which the datascroller check missed', () => {
+test('the panels are paginated, which the datascroller check missed', () => {
   const html = decodeBody(fixture('detail.html'), 'text/html;charset=ISO-8859-1');
 
-  const pager = findMovementPager(html);
-  assert.notEqual(pager, null, 'the slider must be found');
-  assert.equal(pager?.lastPage, 2);
-  assert.equal(pager?.currentPage, 1);
+  const pagers = findPanelPagers(html);
+  assert.ok(pagers.length > 0, 'a slider must be found');
+  assert.equal(pagers[0]?.lastPage, 2);
+  assert.equal(pagers[0]?.currentPage, 1);
+});
+
+test('EVERY slider is returned, not just the first one', () => {
+  // A real detail page carries two: one for the movements panel and one for the
+  // documents grid. Returning only the first is how a second page of DOCUMENTS
+  // stayed invisible while the case looked complete.
+  const html = decodeBody(fixture('detail-two-sliders.html'), 'text/html;charset=ISO-8859-1');
+  const pagers = findPanelPagers(html);
+
+  assert.equal(pagers.length, 2);
+  // Distinct widgets driving distinct regions.
+  assert.notEqual(pagers[0]?.formId, pagers[1]?.formId);
+  assert.notEqual(pagers[0]?.containerId, pagers[1]?.containerId);
+  // Both are genuinely multi page, so both must be walked.
+  assert.ok((pagers[0]?.lastPage ?? 0) > 1);
+  assert.ok((pagers[1]?.lastPage ?? 0) > 1);
 });
 
 test('every pager id is read off the page, never hard coded', () => {
   const html = decodeBody(fixture('detail.html'), 'text/html;charset=ISO-8859-1');
-  const pager = findMovementPager(html);
+  const pager = findPanelPagers(html)[0];
 
   // All four ids are unstable `j_idNNN` values that move when the portal is
   // rebuilt, so each one must come from the markup.
@@ -667,9 +683,9 @@ test('every pager id is read off the page, never hard coded', () => {
   assert.equal(pager?.inputId.startsWith(`${pager?.formId}:`), true);
 });
 
-test('the reported total is the movements footer, not another panel', () => {
+test('the reported total is the panel footer, not another panel', () => {
   const html = decodeBody(fixture('detail.html'), 'text/html;charset=ISO-8859-1');
-  const pager = findMovementPager(html);
+  const pager = findPanelPagers(html)[0];
 
   // The page prints "resultados encontrados" once per panel and the parties
   // panels come first. Reading the first match yields 1, which would make the
@@ -681,7 +697,7 @@ test('the reported total is the movements footer, not another panel', () => {
 test('the first page alone is short of the total the portal reports', () => {
   const html = decodeBody(fixture('detail.html'), 'text/html;charset=ISO-8859-1');
   const detail = parseProcessDetail(html, 'ca', 'https://example.invalid/detail');
-  const pager = findMovementPager(html);
+  const pager = findPanelPagers(html)[0];
 
   // This is the defect, pinned. The delivered HTML carries one page; the panel
   // says there are more. A parser that stops here loses the difference.
@@ -691,8 +707,8 @@ test('the first page alone is short of the total the portal reports', () => {
 
 test('a page request carries the slider value AND the trigger parameter', () => {
   const html = decodeBody(fixture('detail.html'), 'text/html;charset=ISO-8859-1');
-  const pager = findMovementPager(html);
-  assert.notEqual(pager, null);
+  const pager = findPanelPagers(html)[0];
+  assert.notEqual(pager, undefined);
   const form = pageForm(pager!, 2);
 
   assert.equal(form.get(pager!.inputId), '2');
@@ -703,10 +719,22 @@ test('a page request carries the slider value AND the trigger parameter', () => 
   assert.equal(form.get('javax.faces.ViewState'), pager!.viewState);
 });
 
-test('a case with no slider reports complete rather than failed', () => {
-  const html = '<html><body><input name="javax.faces.ViewState" value="j_id9" /></body></html>';
-  assert.equal(findMovementPager(html), null);
+test('a page with no slider is complete, a page with an unreadable one is not', () => {
+  // These two produce the SAME empty list and mean opposite things. The caller
+  // can only tell them apart with hasSlider, so both halves are pinned here.
+  const short = '<html><body><input name="javax.faces.ViewState" value="j_id9" /></body></html>';
+  assert.deepEqual(findPanelPagers(short), []);
+  assert.equal(hasSlider(short), false);
+
+  // A slider whose options this parser cannot read. Silently calling this case
+  // "complete" is exactly the data loss this module exists to prevent.
+  const broken =
+    '<html><body><input name="javax.faces.ViewState" value="j_id9" />' +
+    '<script>new Richfaces.Slider("j_id1:j_id2",{\'minValue\':\'1\'} )</script></body></html>';
+  assert.deepEqual(findPanelPagers(broken), []);
+  assert.equal(hasSlider(broken), true);
 });
+
 
 // ---------------------------------------------------------------------------
 // Documents on a paged fragment.

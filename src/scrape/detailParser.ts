@@ -14,7 +14,7 @@
  * A case that renders 15 movements on the first page reported
  * `65 resultados encontrados` over 5 slider pages, so a parser that reads only
  * the delivered HTML keeps about a quarter of the record and silently drops the
- * documents that hang off the later pages. `movementPager.ts` drives the
+ * documents that hang off the later pages. `panelPager.ts` drives the
  * slider; this module parses one page at a time.
  *
  * Panels:

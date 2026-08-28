@@ -35,7 +35,7 @@ import { HttpClient } from '../src/http/client';
 import { SearchView, assertCaptchaDisabled } from '../src/jsf/searchView';
 import { parseSearchResults } from '../src/scrape/listParser';
 import { parseProcessDetail } from '../src/scrape/detailParser';
-import { fetchRemainingPages, findMovementPager } from '../src/scrape/movementPager';
+import { fetchRemainingPages, findPanelPagers } from '../src/scrape/panelPager';
 import { PdfDownloader } from '../src/scrape/pdfDownloader';
 import { config } from '../src/config';
 
@@ -107,43 +107,61 @@ async function main(): Promise<void> {
   );
 
   // 5. Pagination -----------------------------------------------------------
-  // This is the assertion that catches the defect this scraper was built
-  // around: the delivered HTML is one page, and the panel says so in a widget
-  // that is easy to miss.
-  const pager = findMovementPager(detailResponse.text);
-  const firstPageCount = detail.movimentacoes.length;
+  // A detail page carries up to two sliders, one for the movements panel and
+  // one for the documents grid. Both must be walked. The documents one is the
+  // one that hides downloadable PDFs.
+  const pagers = findPanelPagers(detailResponse.text).filter((p) => p.lastPage > p.currentPage);
+  const firstPageMovements = detail.movimentacoes.length;
+  const firstPageDocuments = detail.documentos.length;
 
-  if (pager === null || pager.lastPage === 1) {
+  if (pagers.length === 0) {
     ok('the case fits on one page, so there is nothing to page', 'short record');
   } else {
-    const extra = await fetchRemainingPages(http, first.detailUrl, pager, first.numeroProcesso);
-    const total = firstPageCount + extra.movimentacoes.length;
+    let movements = firstPageMovements;
+    let documents = firstPageDocuments;
+    const seen = new Set(detail.documentos.map((d) => d.idProcessoDocumento));
+    const summaries: string[] = [];
 
-    assert.equal(extra.pagesFailed, 0, 'a movements page failed to load');
-    assert.ok(
-      total > firstPageCount,
-      `paging added nothing: still ${total} movements over ${pager.lastPage} pages`,
-    );
-    if (pager.reportedTotal !== null) {
-      assert.equal(
-        total,
-        pager.reportedTotal,
-        `read ${total} movements but the panel reported ${pager.reportedTotal}`,
+    for (const pager of pagers) {
+      const extra = await fetchRemainingPages(http, first.detailUrl, pager, first.numeroProcesso);
+      assert.equal(extra.pagesFailed, 0, `a ${extra.kind} page failed to load`);
+
+      movements += extra.movimentacoes.length;
+      let added = 0;
+      for (const document of extra.documentos) {
+        if (seen.has(document.idProcessoDocumento)) continue;
+        seen.add(document.idProcessoDocumento);
+        added += 1;
+      }
+      documents += added;
+
+      // Trust the portal's own footer, never the scraper's count.
+      const got = extra.kind === 'documents' ? documents : movements;
+      if (pager.reportedTotal !== null) {
+        assert.equal(
+          got,
+          pager.reportedTotal,
+          `${extra.kind}: read ${got} but the panel footer reported ${pager.reportedTotal}`,
+        );
+      }
+      summaries.push(
+        `${extra.kind} ${got} over ${pager.lastPage} pages` +
+          (pager.reportedTotal === null ? '' : ` (footer says ${pager.reportedTotal})`),
       );
     }
-    ok(
-      'every movements page is read, not just the delivered one',
-      `${firstPageCount} on page 1, ${total} over ${pager.lastPage} pages` +
-        (pager.reportedTotal === null ? '' : `, panel reports ${pager.reportedTotal}`),
-    );
 
-    // A document that hangs off a later movement must survive too. This is the
-    // half of the bug that paging alone did not fix.
-    const fragmentDocuments = extra.documentos.length;
-    ok(
-      'documents attached to later pages are collected',
-      `${fragmentDocuments} beyond page 1`,
+    assert.ok(
+      movements > firstPageMovements || documents > firstPageDocuments,
+      'paging every panel added nothing at all',
     );
+    ok('every panel is paged, not just the delivered page', summaries.join('; '));
+
+    if (documents > firstPageDocuments) {
+      ok(
+        'the documents grid had a second page that the first GET did not show',
+        `${firstPageDocuments} delivered, ${documents} total`,
+      );
+    }
   }
 
   // 6. A real PDF -----------------------------------------------------------

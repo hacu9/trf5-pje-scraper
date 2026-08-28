@@ -142,26 +142,46 @@ than the cap. There is no next page postback to drive.
 
 The detail page DOES paginate, and the widget is easy to miss. See finding 5.
 
-### 5. The detail page paginates with a slider, not a datascroller.
+### 5. The detail page paginates with sliders, and there are TWO of them.
 
-This one was wrong in the first version of this scraper, and it cost data.
+This one was wrong twice in this scraper, and both times it cost data. It is the
+most expensive thing on this page to get wrong, so it is written out in full.
 
-The parties panels page with a RichFaces datascroller. The movements panel does
-not. It has no `<tfoot>` and no scroller, so a parser that looks for one
-concludes the panel is complete. It is not. Movements page with a RichFaces
-*Slider* labelled `pagina`, printed inline on the page:
+The parties panels page with a RichFaces datascroller. The movements panel and
+the documents grid do NOT. They have no `<tfoot>` and no scroller, so a parser
+that looks for one concludes they are complete. They are not. They page with a
+RichFaces *Slider* labelled `pagina`, printed inline on the page:
 
     new Richfaces.Slider("j_id146:j_id561:j_id562",
       {'minValue':'1','maxValue':'5','sliderValue':'1', ... })
 
-On case `0001223-51.1994.4.05.8300` the delivered HTML carried 15 movements
-while the panel footer read `65 resultados encontrados`. Reading only what was
-delivered kept 23% of the record and lost every document hanging off pages 2
-to 5. `test/fixtures/detail.html`, captured before the bug was found, is itself
-a two page case: 10 movements delivered against a footer reading 30.
+A real detail page carries two of these, and they look alike. Both are labelled
+`pagina`, both drive an A4J postback, and only the region tells them apart:
 
-Driving it needs four ids, every one an unstable `j_idNNN`, so all four are read
-off the page:
+| slider              | region            | panel               |
+| :------------------ | :---------------- | :------------------ |
+| `j_id146:j_id561:*` | `j_id146:j_id474` | Movimentacoes       |
+| `j_id146:j_id653:*` | `j_id146:j_id569` | Documentos juntados |
+
+Case `0001223-51.1994.4.05.8300` measures the cost of each mistake:
+
+| what is read                  | movements | documents |
+| :---------------------------- | --------: | --------: |
+| the delivered HTML alone      |        15 |        15 |
+| movements slider only         |        65 |        15 |
+| both sliders, what ships now  |        65 |        23 |
+
+The first row loses 77% of the record. The second row still loses eight
+downloadable PDFs, and it looks completely healthy while doing it, because the
+movements panel reconciles perfectly against its own footer. That is why the
+completeness check is now per panel and compares against the footer of THAT
+panel: a check that only watches movements cannot see the documents grid lie.
+
+`test/fixtures/detail.html`, captured before any of this was found, is itself a
+two page case: 10 movements delivered against a footer reading 30.
+
+Driving one slider needs four ids, every one an unstable `j_idNNN`, so all four
+are read off the page:
 
 | role           | example                   | source                      |
 | -------------- | ------------------------- | --------------------------- |
@@ -172,7 +192,14 @@ off the page:
 
 The trigger parameter is the part that is easy to drop. Posting the slider value
 alone returns 200 with the region unchanged, which reads as "page 2 is the same
-as page 1" rather than as a failure. `src/scrape/movementPager.ts` holds this.
+as page 1" rather than as a failure. `src/scrape/panelPager.ts` holds this.
+
+**Completeness is never assumed.** Three separate things mark a case partial
+rather than letting it pass for whole: a page request that failed, a panel whose
+final count does not equal the total its own footer prints, and a page that
+carries a slider this parser could not read. That last one matters because "no
+slider found" and "slider found but unparseable" are the same empty result and
+mean opposite things, so `hasSlider` separates them.
 
 **So the scraper paginates by subdividing the query.** `src/scrape/planner.ts`
 keeps a queue of cells, where a cell is a set of search criteria. When a cell
@@ -458,7 +485,7 @@ src/
   scrape/
     listParser.ts          the result grid, and the 30 row cap
     detailParser.ts        case data, parties, movements, documents
-    movementPager.ts       the pagina slider on the movements panel
+    panelPager.ts          the pagina sliders, one per pageable panel
     judicialClasses.ts     the case class catalogue
     planner.ts             adaptive subdivision of the search space
     pdfDownloader.ts       the two hop PDF fetch
@@ -566,10 +593,11 @@ cookie jar and from a jar that had just loaded the detail page. The same is true
 of the `reportCertidaoPDF.seam` receipt link. Those rows are recorded with
 `formato: "html"` and are not counted as failures, because they are not.
 
-**The movements panel is paged through, one request per page.** A long record
-costs one extra request per page beyond the first. The pages are read in order
-and a page that fails is skipped rather than aborting the case, so a case can be
-recorded as partial. `movimentacoesCompleto` on the record says which it was.
+**Every pageable panel is paged through, one request per page.** A long record
+costs one extra request per page beyond the first, per panel. Pages are read in
+order and a page that fails is skipped rather than aborting the case, so a case
+can be recorded as partial. `movimentacoesCompleto` on the record says which it
+was, and it is false unless every panel reconciled against its own footer.
 
 **The `ca` token is treated as opaque.** It is read fresh from each search and
 never reused across runs. Cases are deduplicated by that token AND by their case
