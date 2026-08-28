@@ -36,6 +36,9 @@ node dist/index.js crawl --parte "GERALDA PEREIRA" --max-processes 2 --max-pdfs-
 
 # 4. Turn the output into CSV.
 node dist/index.js export
+
+# 5. Prove the whole path still works against the live portal.
+npm run test:e2e
 ```
 
 Output lands in `data/`. Run `node dist/index.js help` for the full flag list.
@@ -472,11 +475,12 @@ docs/
 ## Tests
 
 ```bash
-npm test
+npm test          # offline: fixtures and a local stub. No network.
+npm run test:e2e  # online: the whole path against the live portal.
 npm run typecheck
 ```
 
-38 tests, no test framework. Two groups matter.
+46 offline tests, no test framework. Three groups matter.
 
 **Parsers**, checked against fixtures captured verbatim from the live portal.
 `test/fixtures/search-response.xml` is a real RichFaces ajax answer trimmed to
@@ -492,9 +496,51 @@ and a download that answers HTML instead of a PDF. The backoff arithmetic itself
 is pinned separately, with the random draw injected, so the window sizes and the
 `Retry-After` precedence are asserted exactly rather than sampled.
 
+**The movements pager**, because this is where the scraper had a real defect.
+The first version looked for the datascroller that the PARTIES panels use, did
+not find one, and concluded a case had nothing to page through. The movements
+panel uses a RichFaces slider instead, so the scraper kept page 1 and dropped
+the rest. `test/fixtures/detail.html`, captured before the bug was found, is
+itself a two page case: 10 movements delivered against a footer reading 30.
+Both halves are pinned, the missed pagination and the documents that hang off
+the later pages.
+
 Two failure modes get a test of their own because they are the ones that lose
 data silently: an expired JSF view that parses as zero rows, and an impossible
 date such as `31/02/2026` that JavaScript would happily roll over to 3 March.
+
+### The end to end test
+
+`npm test` is hermetic, which is the right default and also its limit: a fixture
+cannot tell you the portal still works the way this scraper believes. Every
+component id on the page is an unstable `j_idNNN`, and a redeploy is exactly the
+change a fixture cannot catch.
+
+`npm run test:e2e` walks the real path once, about a dozen requests at the
+polite delay:
+
+```
+e2e against https://pjett.trf5.jus.br
+
+  ok   1. the session bootstraps and the fPP form is understood
+  ok   2. the reCAPTCHA is still disabled server side
+  ok   3. the search returns a parsed result grid (30 rows)
+  ok   4. the case detail parses (11 parties, 15 movements on page 1)
+  ok   5. every movements page is read, not just the delivered one
+          (15 on page 1, 65 over 5 pages, panel reports 65)
+  ok   6. documents attached to later pages are collected (0 beyond page 1)
+  ok   7. one real PDF downloads and is a PDF (19457 bytes)
+
+7 checks passed against the live portal
+```
+
+Step 5 is the one worth reading. It does not trust the scraper's own count: it
+compares what was read against the total the portal itself prints in the panel
+footer, so the check fails if paging ever silently stops early.
+
+If the portal is unreachable the run prints SKIPPED and exits 0. A court being
+down is not a defect in this code, and a red build that means "the network was
+bad" trains you to ignore red builds.
 
 ## Limitations, stated plainly
 

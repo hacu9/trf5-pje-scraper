@@ -19,7 +19,8 @@
     "crawl": "tsx src/index.ts crawl",
     "retry": "tsx src/index.ts retry",
     "export": "tsx src/index.ts export",
-    "test": "tsx test/run.ts"
+    "test": "tsx test/run.ts",
+    "test:e2e": "tsx test/e2e.ts"
   },
   "dependencies": {
     "axios": "^1.7.7",
